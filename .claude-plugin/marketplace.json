@@ -1,0 +1,18 @@
+{
+  "name": "yaghmo",
+  "description": "Plugins by Yaghmoracen Belmir",
+  "owner": {
+    "name": "Yaghmoracen Belmir"
+  },
+  "plugins": [
+    {
+      "name": "kaggle-fast",
+      "description": "Make a Hugging Face model start fast on a free Kaggle GPU notebook: fit check, offline model + wheels pair, measured startup tuning.",
+      "version": "0.1.0",
+      "source": "./",
+      "author": {
+        "name": "Yaghmoracen Belmir"
+      }
+    }
+  ]
+}

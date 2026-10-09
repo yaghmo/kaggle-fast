@@ -1,0 +1,19 @@
+{
+  "name": "kaggle-fast",
+  "description": "Make a Hugging Face model start fast on a free Kaggle GPU notebook: fit check, offline model + wheels pair, measured startup tuning.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Yaghmoracen Belmir"
+  },
+  "homepage": "https://github.com/yaghmo/kaggle-fast",
+  "repository": "https://github.com/yaghmo/kaggle-fast",
+  "license": "MIT",
+  "keywords": [
+    "kaggle",
+    "huggingface",
+    "gpu",
+    "startup",
+    "pytorch",
+    "notebooks"
+  ]
+}
