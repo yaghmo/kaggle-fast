@@ -12,6 +12,7 @@ here fit the notebooks that load them. Building one pair keeps the others, as lo
 attached (kaggle_push.py does that).
 
 Flags: --no-upload (build, upload nothing: a smoke test)   --no-models (wheels only)
+kaggle_push.py adds "skip": ["wheels" and/or "model"] to a spec for what the account already has: that part is kept as is.
 """
 import json, os, shutil, subprocess, sys, time, zipfile
 from pathlib import Path
@@ -23,6 +24,7 @@ DATASET = "wheels"
 # Never ship these: Kaggle's builds match its CUDA driver and each other (torchcodec is built against its exact torch).
 KAGGLE_OWN = ["torch", "torchvision", "torchaudio", "torchcodec", "triton", "pillow", "requests"]
 PAIRS = json.loads(globals().get("PAIRS_JSON", "{}"))
+KEEP = globals().get("KEEP", [])  # every pair the wheels dataset holds now, from kaggle_push.py
 
 
 class _Tee:
@@ -77,21 +79,24 @@ def build_model(p: dict, out: Path):
 
 def build_wheels(name: str, p: dict, out: Path):
     out.mkdir(parents=True)
-    (WORK / "excludes.txt").write_text("\n".join(KAGGLE_OWN + p.get("excludes", [])))
-    (WORK / "deps.in").write_text("\n".join(p["deps"]))
-    pins = WORK / "pins.txt"
-    sh([uv(), "pip", "compile", "-q", "--python", sys.executable, "--excludes", WORK / "excludes.txt",
-        WORK / "deps.in", "-o", pins])  # git deps come out as `pkg @ git+url@<commit>`: pinned to what's built now
-    # Kaggle's image is a pre-existing non-uv env: pip wheel is the one command that downloads wheels AND builds
-    # the sdist-only / git ones into wheels.
-    sh([sys.executable, "-m", "pip", "wheel", "-q", "--no-deps", "-w", out, "-r", pins])
-    # pins.txt names git deps by URL; after pip wheel they are plain wheels in the folder, so install by name
     names = []
-    for line in pins.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
-            names.append(line.split(" @ ")[0] if " @ " in line else line)
-    (out / "requirements.txt").write_text("\n".join(names) + "\n")
+    if p.get("wheels_from"):  # runs on another pair's wheels: this folder only carries the source checkouts
+        (out / "WHEELS_FROM").write_text(p["wheels_from"])
+    else:
+        (WORK / "excludes.txt").write_text("\n".join(KAGGLE_OWN + p.get("excludes", [])))
+        (WORK / "deps.in").write_text("\n".join(p["deps"]))
+        pins = WORK / "pins.txt"
+        sh([uv(), "pip", "compile", "-q", "--python", sys.executable, "--excludes", WORK / "excludes.txt",
+            WORK / "deps.in", "-o", pins])  # git deps come out as `pkg @ git+url@<commit>`: pinned to what's built now
+        # Kaggle's image is a pre-existing non-uv env: pip wheel is the one command that downloads wheels AND builds
+        # the sdist-only / git ones into wheels.
+        sh([sys.executable, "-m", "pip", "wheel", "-q", "--no-deps", "-w", out, "-r", pins])
+        # pins.txt names git deps by URL; after pip wheel they are plain wheels in the folder, so install by name
+        for line in pins.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                names.append(line.split(" @ ")[0] if " @ " in line else line)
+        (out / "requirements.txt").write_text("\n".join(names) + "\n")
     src = {}
     for repo, url in p.get("repos", {}).items():
         d = WORK / "repos" / repo
@@ -104,11 +109,11 @@ def build_wheels(name: str, p: dict, out: Path):
     print(f"{name}: {len(names)} wheels, python {sys.version.split()[0]}, sources {src}", flush=True)
 
 
-def seed_others(names: list[str], root: Path):
-    """A new dataset version replaces the old one, so carry the other pairs over from the attached current version."""
+def seed_others(root: Path):
+    """A new dataset version replaces the old one, so carry every pair not rebuilt here over from the attached version."""
     for m in Path("/kaggle/input").glob("datasets/*/*/*/PAIR_*_WHEELS"):
         d = m.parent
-        if d.name not in names and not (root / d.name).exists():
+        if not (root / d.name).exists():
             shutil.copytree(d, root / d.name)
             print(f"kept pair {d.name}", flush=True)
 
@@ -133,9 +138,11 @@ def main():
     shutil.copy2(uv(), root / "uv")  # runs work with Internet off
     for name in names:
         p = PAIRS[name]
-        build_wheels(name, p, root / name)
-        stamp(f"{name}: wheels built, {sum(f.stat().st_size for f in (root / name).rglob('*') if f.is_file())/2**30:.2f} GiB")
-        if p.get("hf") and "--no-models" not in sys.argv:
+        skip = p.get("skip", [])
+        if "wheels" not in skip:
+            build_wheels(name, p, root / name)
+            stamp(f"{name}: wheels built, {sum(f.stat().st_size for f in (root / name).rglob('*') if f.is_file())/2**30:.2f} GiB")
+        if p.get("hf") and "model" not in skip and "--no-models" not in sys.argv:
             model = WORK / p["model_slug"]
             build_model(p, model)
             (model / f"PAIR_{name}_MODEL").write_text(name)
@@ -145,8 +152,12 @@ def main():
                 kagglehub.model_upload(h, str(model), license_name=p.get("license", "Other"), version_notes=f"pair {name}")
                 stamp(f"uploaded model {h}")
             shutil.rmtree(model)  # free disk for the next model
-    if upload:
-        seed_others(names, root)
+    if upload and any("wheels" not in PAIRS[n].get("skip", []) for n in names):
+        seed_others(root)
+        lost = [k for k in KEEP if not (root / k).exists()]
+        if lost:  # happened once: the attached dataset was not found, and the new version came out without three pairs
+            sys.exit(f"Not uploading: pairs {lost} are in the wheels dataset but not under /kaggle/input "
+                     f"({sorted(map(str, Path('/kaggle/input').glob('*/*/*')))[:20]}). The new version would drop them.")
         h = f"{me}/{DATASET}"
         kagglehub.dataset_upload(h, str(root), version_notes=f"pairs {names}, python {sys.version.split()[0]}")
         stamp(f"uploaded dataset {h}: {sorted(d.name for d in root.iterdir() if d.is_dir())}")

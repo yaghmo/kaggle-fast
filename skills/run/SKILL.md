@@ -55,9 +55,17 @@ It prints the weight files, licence, gating and a verdict per limit. Then do the
    `uv pip compile deps.in --python-version 3.13 --python-platform x86_64-manylinux_2_28 --no-build`
 3. **Judge VRAM honestly.** The script's number is weights times 1.5. Models with large activations (video, long audio,
    high resolution) need more; say so. If it only fits in fp16 or split over two GPUs, that is a finding, not a detail.
+4. **See what Kaggle already has, and borrow it**: `python scripts/kaggle_push.py have <model name>`. It lists the user's
+   Models file by file, the pairs in their `wheels` dataset with their pins, and public uploads that match the name.
+   - A weight file already in one of the user's Models (a VAE, a text encoder, a face detector) stays out of the spec:
+     attach that Model with a second `--model-source` and point the code at its mount.
+   - A pair whose pins cover the dependencies (count what Kaggle's image brings too) is reused with `wheels_from` in the
+     spec: no wheels are built.
+   - Other people's uploads are a lead, not a source. They can change or vanish, and a `.pth` is a pickle. Borrow one only
+     with the user's yes, after a CPU notebook has matched its sha256 with Hugging Face.
 
-Give the user a short verdict: fits / fits with conditions / does not fit, the reasons, what would be uploaded (file list
-and total size), and anything that blocks (gated repo, no wheel for a dependency, licence that forbids redistribution even
+Give the user a short verdict: fits / fits with conditions / does not fit, the reasons, what is borrowed, what would be
+uploaded (file list and total size), and anything that blocks (gated repo, no wheel for a dependency, licence that forbids redistribution even
 privately). **Stop here and ask** before building. If it does not fit, say what would make it fit and do not build.
 
 ## 2. Build the pair
@@ -70,6 +78,8 @@ python scripts/kaggle_push.py build <name>.json
 
 A CPU notebook downloads the weights straight into Kaggle (nothing passes through the user's connection), builds the
 wheels, uploads the Model and a new version of the `wheels` dataset. Other pairs already in `wheels` are carried over.
+A Model or a pair's wheels that the account already has are kept and not built again; `--rebuild` replaces them (needed
+after the spec's files or deps change).
 The command prints the tail of `setup.log`; `ALL DONE` is the proof. Typical build: a few minutes plus upload.
 
 ## 3. Write the run script

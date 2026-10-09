@@ -8,7 +8,7 @@
     {
       "name": "kaggle-fast",
       "description": "Make a Hugging Face model start fast on a free Kaggle GPU notebook: fit check, offline model + wheels pair, measured startup tuning.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "source": "./",
       "author": {
         "name": "Yaghmoracen Belmir"

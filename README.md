@@ -57,6 +57,8 @@ loaded 4s, VRAM 7.3 GiB, host RAM peak 8.5 GiB
 2. **Asks before it uploads anything**, and before the first GPU run.
 3. **Builds a "pair"** in a free CPU notebook: the weights become a private Kaggle Model, the dependencies become pinned
    wheels in one private dataset. Weights go from Hugging Face straight to Kaggle; nothing passes through your connection.
+   It first lists what your account already holds and borrows it: a weight file in another of your Models is attached
+   instead of uploaded again, and a pair whose pins cover the dependencies lends its wheels.
 4. **Writes the run script** around a small loader: a uv venv built from the wheels, Kaggle's own torch and CUDA left
    untouched, a timestamp printed at every phase.
 5. **Squeezes the startup.** Free CPU notebooks find the cause of each slow phase; one GPU run confirms the fix.

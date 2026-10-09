@@ -124,11 +124,13 @@ def load(name: str, need_model: bool = True) -> SimpleNamespace:
     model = _find(name, "MODEL") if need_model else None
     if model:
         warm(model)
-    wheels = _find(name, "WHEELS")
+    src = wheels = _find(name, "WHEELS")
+    if (src / "WHEELS_FROM").exists():  # spec key wheels_from: this pair brings its source and runs on another pair's wheels
+        wheels = _find((src / "WHEELS_FROM").read_text().strip(), "WHEELS")
     uv = TMP / "uv"
     shutil.copy(next(p for p in (wheels / "uv", wheels.parent / "uv") if p.exists()), uv)  # mounts are read-only
     uv.chmod(0o755)
-    venv = TMP / f"venv_{name}"
+    venv = TMP / f"venv_{wheels.name}"
     py = venv / "bin" / "python"
     if not py.exists():
         subprocess.run([str(uv), "venv", "-q", "--system-site-packages", "--python", sys.executable, str(venv)], check=True)
@@ -144,7 +146,7 @@ def load(name: str, need_model: bool = True) -> SimpleNamespace:
                                               f".__dict__.setdefault('__path__', []).insert(0, {str(site / 'google')!r})" + chr(10))
     def source(repo: str) -> Path:
         """Writable copy of the pinned checkout (the input mount is read-only and run scripts usually patch files)."""
-        shutil.copytree(wheels / "src" / repo, TMP / repo, dirs_exist_ok=True)
+        shutil.copytree(src / "src" / repo, TMP / repo, dirs_exist_ok=True)
         return TMP / repo
 
     def activate():

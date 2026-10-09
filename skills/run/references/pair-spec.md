@@ -30,10 +30,15 @@ scripts: they are the record of what was built.
 | `zips` | `{folder in the Model: URL}` for weights that are not on Hugging Face. Unzipped into that folder. |
 | `license_url` | Fetched into the Model as `LICENSE`. Optional. |
 | `deps` | What you would `pip install`. Pin what the model's code pins. `pkg @ git+https://...` works and is pinned to the commit built. |
+| `wheels_from` | Name of a pair already in `wheels` whose pins cover this model. Replaces `deps` and `excludes`: no wheels are built, the folder holds only `repos`, and `load("<name>")` builds the venv from that pair. Rebuilding that pair with other pins changes this one too. |
 | `excludes` | Packages to leave to Kaggle, on top of torch, torchvision, torchaudio, torchcodec, triton, pillow, requests (always excluded). Add `numpy` when the code is happy with Kaggle's. |
 | `repos` | `{folder: git URL}` cloned at build time, commit recorded in `SOURCES.txt`, read at run time with `pair.source("<folder>")`. |
 
 ## Getting the spec right
+
+- **Borrow before building.** `kaggle_push.py have <model name>` shows what the account already holds. Leave out of `hf`
+  any file one of your Models already has (attach that Model at run time), and use `wheels_from` when a pair's pins cover
+  the deps. `build` skips a Model or a pair that already exists, so after changing a spec pass `--rebuild`.
 
 - **Everything the code fetches at run time has to be in the pair**, or the run needs Internet and pays the download every
   time. Read the model's inference code for `from_pretrained("org/name")`, `hf_hub_download`, `torch.hub`, `urlretrieve`

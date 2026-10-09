@@ -38,6 +38,14 @@ platform changes: when a run contradicts a line below, trust the run and fix the
   or the notebook silently gets the previous version.
 - A new dataset version replaces the old one. A build that rebuilds one pair must carry the other pairs over from the
   attached current version, or they are gone.
+- That carry-over failed once: a build notebook had `wheels` in its sources, found no other pair under `/kaggle/input`, and
+  uploaded a version with one pair instead of four. Cause not found. The builder now refuses to upload when a pair the
+  dataset holds would be dropped.
+- An old dataset version cannot be reached from a script notebook. Tried: `kagglehub.dataset_download(".../versions/12")`
+  (`New Datasets cannot be attached in non-interactive sessions`), the same over HTTP with `DISABLE_KAGGLE_CACHE` (404 on a
+  private dataset), and `owner/slug/versions/12` in `dataset_sources` (the CLI rejects it; the API accepts it and mounts
+  the latest). What does work, from your own machine: `ListDatasetFiles` and `DownloadDataset` with
+  `datasetVersionNumber`, so a lost pair can be rebuilt from the old version's `requirements.txt` as exact pins.
 - `kaggle kernels output` downloads everything, which can be gigabytes. Pass `--file-pattern`. Listing an output with tens
   of thousands of files runs into `429 Too Many Requests`.
 
@@ -61,5 +69,13 @@ platform changes: when a run contradicts a line below, trust the run and fix the
   you still get Kaggle's protobuf: run protobuf-dependent code (onnx, mediapipe) through `pair.python`.
 - `transformers.from_pretrained` restores the original `torch.nn.init` functions when it finishes. Any patch of
   `torch.nn.init` made before it is silently undone for everything constructed after it.
-- Notebooks pushed through the API are single files: paste the loader in front of the run script.
+- `onnxruntime-gpu` from PyPI is built for CUDA 13 from 1.27 on; Kaggle's torch is `+cu128`. An unpinned install
+  (1.31.0 here) cannot load its CUDA provider (`libcublasLt.so.13: cannot open shared object file`) and runs every
+  session on the CPU, with a warning and no error. Seen in a GPU run: `Applied providers: ['CPUExecutionProvider']`.
+  Pin `onnxruntime-gpu<1.27` (CUDA 12.8 builds) and print `session.get_providers()` in the run script.
+- Kaggle's torch loads checkpoints with `weights_only=True`, which refuses files in torch's old `.tar` format
+  (torchvision's `resnet18-5c106cde.pth`): `Cannot use weights_only=True with files saved in the legacy .tar format`.
+  Patch that one `torch.load` to `weights_only=False`, and only for a file whose hash you checked.
+- Notebooks pushed through the API are single files: paste the loader in front of the run script. Tags with `_` end up
+  with `-` in the notebook's slug.
 - On Windows, run the `kaggle` CLI with `PYTHONUTF8=1` and read logs as UTF-8.
