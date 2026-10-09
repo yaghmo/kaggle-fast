@@ -266,14 +266,16 @@ the time in `cudnn_convolution`, waiting in `cudaDeviceSynchronize` / `cudaEvent
 **Cause here.** A face detector set `torch.backends.cudnn.benchmark = True` inside its detect function, on every call. A
 patch of the one assignment in its constructor did nothing; grep the whole checkout for `cudnn`.
 
-**Fix.** It is a trade, so decide by length, after the code that wants it has run:
+**Fix.** Switch it off after the code that wants it has run, before the loop that does not:
 
 ```python
-torch.backends.cudnn.benchmark = n_frames > 600
+torch.backends.cudnn.benchmark = False
 ```
 
-**Measured.** UNet + VAE decode, batch 8, fp32. On: first batch 20 s, then 1.50 s per batch. Off: first batch 2 s, then
-1.78 s per batch. Break-even near 600 frames; a 45,000 frame job gains 25 minutes with it on, an 8 s clip loses 13 s.
+**Measured.** UNet + VAE decode, batch 8, fp32: first batch 20 s -> 2 s. Whether the search buys faster batches has to be
+measured on a long loop, not a short one: on an 8 s clip (24 batches) it looked like 1.50 s per batch with it against
+1.78 s without, which would pay off after 600 frames. On 1551 frames it was 1.87 s with it and 1.83 s without. No gain, so
+it is off.
 
 ## 14. A helper network in fp32 at full frame size
 

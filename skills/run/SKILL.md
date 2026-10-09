@@ -167,7 +167,7 @@ time of the first item. Then, for each long phase:
 |---|---|---|---|
 | seconds before a loop, no GPU use | a heavy import done lazily at first call (`librosa.load`) | call what it wraps (`soundfile` + `soxr`); prove the arrays equal | yes |
 | frame or audio files written and read back | PNG's zlib | BMP, or PNG level 0; prove the pixels equal | yes |
-| first call of a function far above the average | `cudnn.benchmark` left on by some library, searching per new shape | switch it off after the code that wants it | no |
+| first call of a function far above the average | `cudnn.benchmark` left on by some library, searching per new shape | switch it off after the code that wants it; judge any steady gain on a long loop | no |
 | a per-item rate that is all network time | real arithmetic | fp16, a smaller input, or nothing: see below | no |
 | a Python loop around a small network | per-item overhead | batch it, if the code allows | partly |
 
