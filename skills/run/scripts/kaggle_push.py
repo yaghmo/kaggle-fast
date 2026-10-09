@@ -46,11 +46,19 @@ def push(slug: str, code: str, gpu: bool, internet: bool, datasets: list, models
             "machine_shape": "NvidiaTeslaT4" if gpu else "", "dataset_sources": datasets, "model_sources": models,
             "kernel_sources": [], "competition_sources": []}))
         print(kaggle("kernels", "push", "-p", d).strip(), flush=True)
-    t0 = time.time()
+    t0, warned = time.time(), False
     while True:
-        status = kaggle("kernels", "status", f"{user()}/{slug}").lower().strip()
-        if any(s in status for s in ("complete", "error", "cancel")):
+        # A failed status call must not end the wait: the notebook runs on. It happened when the CLI's login expired
+        # mid-run ("Permission 'kernels.get' was denied"); after `kaggle auth login --force` the same loop carries on.
+        r = subprocess.run([KAGGLE, "kernels", "status", f"{user()}/{slug}"], capture_output=True, text=True, encoding="utf-8",
+                           env={**os.environ, "PYTHONUTF8": "1"})
+        status = r.stdout.lower().strip()
+        if not r.returncode and any(s in status for s in ("complete", "error", "cancel")):
             return f"{status} after {time.time()-t0:.0f}s"
+        if r.returncode and not warned:
+            warned = True
+            print(f"status call failed, still waiting (the notebook keeps running): {(r.stdout + r.stderr).strip()[:300]}\n"
+                  "If it says denied or authentication: run `kaggle auth login --force` in another terminal.", flush=True)
         time.sleep(30)
 
 

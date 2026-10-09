@@ -57,6 +57,10 @@ platform changes: when a run contradicts a line below, trust the run and fix the
 - With Internet off, any library that phones home at import waits for its timeout. Found so far: `albumentations` (pulled
   in by `insightface`) checks for a newer release, about 63 s. `NO_ALBUMENTATIONS_UPDATE=1` turns it off.
 - A script notebook reports `complete` even when the script crashed. Print an explicit end marker and check for it.
+- The CLI's OAuth login (`kaggle auth login`) expires and was not renewed by itself: 12 h after login every call failed
+  with `Permission 'kernels.get' was denied` or `Authentication required`, in the middle of a run. The notebook kept
+  running; only the local wait died. `kaggle auth login` then says "already logged-in"; `kaggle auth login --force`
+  fixes it, and the token it issued lasted 3 h. For anything unattended, use an API token instead of the OAuth login.
 
 ## Python packaging traps
 
