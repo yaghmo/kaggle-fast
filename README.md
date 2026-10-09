@@ -44,9 +44,9 @@ loaded 4s, VRAM 7.3 GiB, host RAM peak 8.5 GiB
 ## Use
 
 ```
-/kaggle-fast:run <org/repo>            fit check -> you confirm -> build -> run script -> squeeze startup
+/kaggle-fast:run <org/repo>            fit check -> you confirm -> build -> run script -> squeeze startup, then the work
 /kaggle-fast:run fit <org/repo>        only the fit check
-/kaggle-fast:run squeeze <run script>  only the startup squeeze
+/kaggle-fast:run squeeze <run script>  only the squeeze
 ```
 
 ## What it does
@@ -62,6 +62,9 @@ loaded 4s, VRAM 7.3 GiB, host RAM peak 8.5 GiB
 4. **Writes the run script** around a small loader: a uv venv built from the wheels, Kaggle's own torch and CUDA left
    untouched, a timestamp printed at every phase.
 5. **Squeezes the startup.** Free CPU notebooks find the cause of each slow phase; one GPU run confirms the fix.
+6. **Squeezes the work.** Splits a finished run's log into phases and per-loop rates, times the functions inside the
+   slow loops, and applies only what leaves the output unchanged. Anything that changes it (fp16, encoder presets) is
+   measured and left for you to decide.
 
 ## Install
 

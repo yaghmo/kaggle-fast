@@ -1,4 +1,4 @@
-# Startup speedups: what to measure, what to change, what it gave
+# Speedups: what to measure, what to change, what it gave
 
 Each entry: the symptom, the probe that proves it, the fix, and the gain measured on one real case. The gains are from
 three pairs (SAM-Audio large fp16, LatentSync 1.5, Fish Audio S2 Pro) on Kaggle T4 notebooks. Your numbers will differ:
@@ -15,6 +15,15 @@ the method transfers, the seconds do not. Measure before applying anything that 
 7. Recursive globs over `/kaggle/input`
 8. Tried, did not help
 9. How to measure without fooling yourself
+
+After the models are ready (the work, which scales with the input):
+
+10. Find the time: stamps, loop rates, timers
+11. A heavy import hiding in the first call
+12. PNG as a scratch format
+13. `cudnn.benchmark` left on by a library
+14. A helper network in fp32 at full frame size
+15. Tried on the work, did not help; and what is left
 
 ---
 
@@ -177,4 +186,112 @@ Keep these so nobody spends a run on them again.
   total once on GPU. The CPU image is not identical to the GPU one, so a CPU win is a lead, not a result.
 - **Stamp every phase** (`[t+12s] pair loaded`) in the run script itself. The gap between two stamps is the only number
   that counts; everything else is a guess about it.
-- **Change one thing per GPU run.** Two changes at once and a slower run tells you nothing about either.
+- **Change one thing per GPU run.** Two changes at once and a slower run tells you nothing about either. Changes in
+  different stamped phases may share a run: each gap still has one cause.
+
+---
+
+# After the models are ready
+
+Sections 10 to 15 are about the work itself, which scales with the input. All numbers are MuseTalk 1.5 on one T4, an 8 s
+clip (268 input frames of 704x1216, 200 output frames), five GPU runs: 287 s -> 184 s with the output unchanged.
+
+## 10. Find the time: stamps, loop rates, timers
+
+`scripts/phases.py <log>` gives the gaps between stamps and, for each tqdm loop, items, seconds per item and the first
+item. That is free. What it cannot see is which function inside a loop body costs the time. For that, one diagnostic GPU
+run with timers wrapped around the model's own functions from the run script:
+
+```python
+SPENT = {}
+def timed(obj, name, label):
+    f = getattr(obj, name)
+    def g(*a, **k):
+        torch.cuda.synchronize()            # else the time lands on whichever later line waits for the GPU
+        t = time.time(); r = f(*a, **k)
+        torch.cuda.synchronize()
+        s = SPENT.setdefault(label, [0, 0.0, time.time() - t]); s[0] += 1; s[1] += time.time() - t
+        return r
+    setattr(obj, name, g)
+timed(mv.VAE, "decode_latents", "vae decode, per batch")     # class or module attribute, before the model's main runs
+atexit.register(lambda: [print(f"timer {k}: {n} calls, {t:.1f}s, {t/n*1000:.0f} ms/call, first call {f:.1f}s") for k, (n, t, f) in SPENT.items()])
+```
+
+Print GPU memory at the stamps too (`torch.cuda.mem_get_info()`): it settles "is it memory pressure" in one line (it was
+not: 5.3 of 14.6 GiB). Switch the timers off for normal runs.
+
+**Measured.** The timers moved the blame three times: the 48 s "landmark" phase was 5 s of ONNX pose and 43 s of a face
+detector; "frame extraction" was 1 s of ffmpeg and 21 s of audio loading; the 70 s inference loop was 49 s of VAE decode.
+
+## 11. A heavy import hiding in the first call
+
+**Symptom.** Seconds before a loop starts, GPU idle, the same on every fresh session and almost gone when repeated.
+
+**Probe.** CPU notebook, fresh process, `python -X importtime -c "<the call>"`, twice. `librosa.load`: 36.8 s first run,
+3.5 s again; 12 s of it imports (`scipy.signal`, `numba`), the rest their cold files. `import librosa` itself is lazy,
+which is why the import phase did not show it.
+
+**Fix.** Call what the library calls underneath, and prove the result equal in the probe before using it:
+
+```python
+y, sr0 = soundfile.read(path, dtype="float32", always_2d=True); y = y.mean(axis=1)
+if sr0 != 16000:
+    n = int(np.ceil(len(y) * 16000 / sr0)); y = soxr.resample(y, sr0, 16000, quality="HQ")
+    y = y[:n] if len(y) >= n else np.pad(y, (0, n - len(y)))
+```
+
+Keep the library call as the fallback for formats the direct path cannot read.
+
+**Measured.** Identical samples (max abs diff 0). 21.6 s -> 0.1 s on GPU.
+
+## 12. PNG as a scratch format
+
+**Symptom.** The model extracts frames to PNG, reads them back, writes its result frames as PNG and encodes those.
+
+**Probe.** CPU notebook: the model's own ffmpeg command against `-compression_level 0` and against `.bmp`, with
+`cv2.imread` timed and the arrays compared.
+
+**Fix.** BMP for every scratch frame (patch the extension in the extract command, the glob, the `imwrite` and the encode
+command). Lossless either way; BMP skips zlib. It costs disk: 2.5 MB per 704x1216 frame, which `/kaggle/tmp` has (1.1 TB
+free).
+
+**Measured.** 268 frames: ffmpeg 9.1 -> 1.1 s, `cv2.imread` 4.3 -> 0.4 s, pixels identical. On GPU: extract + read
+13 -> 1.4 s, blend + write of 200 frames 23 -> 15 s. PNG level 1 was not worth it (ffmpeg 4.7 s, read 4.8 s).
+
+## 13. `cudnn.benchmark` left on by a library
+
+**Symptom.** The first call of a network takes many times its average. A CPU-only `torch.profiler` run of that call shows
+the time in `cudnn_convolution`, waiting in `cudaDeviceSynchronize` / `cudaEventSynchronize`: cuDNN is timing algorithms.
+
+**Cause here.** A face detector set `torch.backends.cudnn.benchmark = True` inside its detect function, on every call. A
+patch of the one assignment in its constructor did nothing; grep the whole checkout for `cudnn`.
+
+**Fix.** It is a trade, so decide by length, after the code that wants it has run:
+
+```python
+torch.backends.cudnn.benchmark = n_frames > 600
+```
+
+**Measured.** UNet + VAE decode, batch 8, fp32. On: first batch 20 s, then 1.50 s per batch. Off: first batch 2 s, then
+1.78 s per batch. Break-even near 600 frames; a 45,000 frame job gains 25 minutes with it on, an 8 s clip loses 13 s.
+
+## 14. A helper network in fp32 at full frame size
+
+**Symptom.** A detector that is not the generating model takes more per frame than the model.
+
+**Fix.** `torch.autocast("cuda", dtype=torch.float16)` around that network only, outputs cast back to float. Allowed
+without asking only when what it feeds can be shown unchanged: print a fingerprint of its result (here an md5 of every
+crop box) in the run before and the run after.
+
+**Measured.** S3FD on 1216x704 frames: 131 -> 37 ms per frame, landmark phase 49 -> 24 s, the md5 of 268 crop boxes
+identical. The generating UNet and VAE stayed in fp32: that is a quality choice and the user's.
+
+## 15. Tried on the work, did not help; and what is left
+
+- **`cudnn.benchmark = False` for the whole run.** No change to the detector loop (48 s both ways); the generating loop
+  got a faster start and a slower rate, see section 13.
+- **Suspecting the ONNX model.** DWPose through onnxruntime on CUDA was 19 ms per frame, a tenth of its phase. TensorRT
+  would add an engine build of minutes to every session to shave milliseconds.
+- **Left, and accepted as real work:** fp32 arithmetic of the generating model (VAE encode 58 ms x 2 per frame, decode
+  about 150 ms per frame, UNet about 50 ms per frame), CPU blending 66 ms per frame, x264 `-preset medium` (12.2 s against
+  3.5 s for `veryfast` on 268 frames: a different encode, so the user's call). Cold imports stayed at 30 s.

@@ -1,6 +1,6 @@
 ---
 name: run
-description: "Take a Hugging Face model to a fast, offline Kaggle GPU notebook run: check that it fits Kaggle's free tier, package its weights as a private Kaggle Model and its dependencies as pinned wheels (a 'pair'), then measure and cut the time between session start and the first inference. Use for /kaggle-fast:run <hf repo>, and whenever the user wants to run, host, port or speed up a model on Kaggle, asks whether a model fits Kaggle or a T4, complains that a Kaggle notebook is slow to start, load a model or import, pip-installs or downloads weights at the top of a Kaggle notebook, or wants to stop wasting weekly GPU quota, even when they do not say 'skill' or 'pair'."
+description: "Take a Hugging Face model to a fast, offline Kaggle GPU notebook run: check that it fits Kaggle's free tier, package its weights as a private Kaggle Model and its dependencies as pinned wheels (a 'pair'), then measure and cut the time between session start and the first inference, and after that the per-input work itself. Use for /kaggle-fast:run <hf repo>, and whenever the user wants to run, host, port or speed up a model on Kaggle, asks whether a model fits Kaggle or a T4, complains that a Kaggle notebook is slow to start, load a model or import, pip-installs or downloads weights at the top of a Kaggle notebook, or wants to stop wasting weekly GPU quota, even when they do not say 'skill' or 'pair'."
 ---
 
 # /kaggle-fast:run
@@ -10,9 +10,9 @@ packages, downloading weights and importing. This skill moves all of that out of
 Kaggle Model with the weights, one folder of pinned wheels) and then cuts what is left by measuring it.
 
 ```
-/kaggle-fast:run <org/repo>            full flow: fit check -> confirm -> build the pair -> run script -> squeeze startup
+/kaggle-fast:run <org/repo>            full flow: fit check -> confirm -> build the pair -> run script -> squeeze startup -> squeeze the work
 /kaggle-fast:run fit <org/repo>        only the fit check
-/kaggle-fast:run squeeze <run script>  only the startup squeeze, for a pair that already exists
+/kaggle-fast:run squeeze <run script>  only the squeeze (startup, then the work), for a pair that already exists
 ```
 
 Scripts are in `scripts/` next to this file; call them by their full path. Work in the user's project folder: specs, run
@@ -141,7 +141,48 @@ load paths produce the same model: `probe_build.py` compares every tensor. Do no
 `0 differ` for that model.
 
 Stop when the remaining gaps are small against the inference itself, or when a probe shows the time is real work. Say
-what is left and why.
+what is left and why. Then go on to step 5: on anything longer than a demo clip, the work after "model on GPU" is most
+of the session.
+
+## 5. Squeeze the work
+
+The seconds after the models are ready scale with the input; startup does not. A model that takes 0.6 s per frame needs
+8 GPU hours for a 30 minute video, whatever its startup. Same method as step 4, finer tools:
+
+```
+python scripts/phases.py kaggle_out/<tag>/pair-run-<tag>.log [word ...]
+```
+
+It splits a run you already paid for: seconds between stamps, and for every tqdm loop the items, seconds per item and the
+time of the first item. Then, for each long phase:
+
+1. **Stamp inside it.** Wrap the model's own functions from the run script (no edit of its code) so each step of the
+   pipeline prints a stamp. A phase named "preprocessing" hid a 21 s audio load here.
+2. **Time the functions inside the loops** in one diagnostic GPU run: count, total, per call and first call, with
+   `torch.cuda.synchronize()` around each, because without it the time lands on whichever later line waits for the GPU.
+   `references/speedups.md`, section 10, has the wrapper.
+3. **Sort what you find:**
+
+| What the timers show | What it usually is | Fix | Free CPU probe? |
+|---|---|---|---|
+| seconds before a loop, no GPU use | a heavy import done lazily at first call (`librosa.load`) | call what it wraps (`soundfile` + `soxr`); prove the arrays equal | yes |
+| frame or audio files written and read back | PNG's zlib | BMP, or PNG level 0; prove the pixels equal | yes |
+| first call of a function far above the average | `cudnn.benchmark` left on by some library, searching per new shape | switch it off after the code that wants it | no |
+| a per-item rate that is all network time | real arithmetic | fp16, a smaller input, or nothing: see below | no |
+| a Python loop around a small network | per-item overhead | batch it, if the code allows | partly |
+
+4. **Separate what keeps the result from what changes it.** Lossless container formats, load paths that compare equal and
+   cudnn settings keep it: apply them, with the proof next to the patch. fp16, a faster encoder preset, a smaller detector
+   input or fewer steps change the output: measure the gain, say what changes, and let the user decide. Never switch one of
+   those on by default.
+5. **Fingerprint what the fast path must not move** (crop boxes, token ids, a checksum of the first output) and print it
+   in every run, so a later change can be checked against an earlier run for free.
+
+Changes in different stamped phases can share one GPU run: each phase's gap still has one cause. Two changes in the same
+phase cannot.
+
+Stop when what is left is network time in the precision the user chose. Give the per-item cost and what it means for
+their real input length (frames x seconds per frame, against the 12 h session and the weekly quota).
 
 ## Report
 
