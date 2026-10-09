@@ -18,9 +18,6 @@ Time from the start of the script to the model sitting on the GPU, same notebook
 | **start to model on GPU** | **158 s** | **67 s** | |
 | host RAM peak | 15.9 GiB | 8.5 GiB | |
 
-A second run of the same script: pair load 20 s, imports 41 s, model on the GPU at 65 s. The phases trade time with
-each other from run to run; the total is the number to read.
-
 The 96 seconds were three things, each found with a probe on a free CPU notebook:
 
 | cause | measured | fix | after |
@@ -44,29 +41,6 @@ loaded 4s, VRAM 7.3 GiB, host RAM peak 8.5 GiB
 [t+94s] ALL DONE
 ```
 
-## Second example: Fish Audio S2 Pro (4.5 billion parameters, its own API server) on 2x T4
-
-Here the model is built inside the project's server, in another process, so the fixes are one-line rewrites of its code
-in the run's writable checkout. Times are from the server's own log.
-
-| step | before | after | what changed |
-|---|---|---|---|
-| LLM constructor | 69 s | 0.2 s | `no_init_patch()` on the line that builds the model |
-| move to GPU | 34 s | 2.6 s | the bf16 to fp16 cast was running on one CPU core: copy first, cast on the GPU |
-| codec load | 29 s | 8 s | `no_init_patch()` |
-| **server ready** | **186 s** | **54 s** | |
-| whole run, 7 requests | 403 s | 232 s | |
-
-Same tensors with and without the skipped init: `LLM ... 361 tensors compared, 0 extra, 0 differ`,
-`codec ... 541 tensors compared, 0 extra, 0 differ`. All seven requests returned 200 before and after.
-
-Other models, same method:
-
-- **LatentSync 1.5**: imports of the real entry point 72.9 s -> 10.0 s. `albumentations` was waiting for a network timeout
-  on every start with Internet off.
-- **Any venv with its own protobuf**: `onnx` refused to load (`gencode 6.31.1 runtime 5.29.5`). Kaggle registers its own
-  `google` package before your code runs; the loader fixes the lookup.
-
 ## Use
 
 ```
@@ -87,22 +61,6 @@ Other models, same method:
    untouched, a timestamp printed at every phase.
 5. **Squeezes the startup.** Free CPU notebooks find the cause of each slow phase; one GPU run confirms the fix.
 
-## What did not help
-
-Kept in the skill so nobody spends a run on them again (`skills/run/references/speedups.md` has the numbers):
-
-- Compiling bytecode at install. It looked like 30 s saved in a CPU test and cost 34 s in a real GPU session.
-- A prebuilt site-packages tree mounted from a notebook output instead of installing wheels.
-- Reading Kaggle's torch and CUDA libraries into the page cache up front.
-- Building the model in fp16 instead of fp32.
-- Blocking tensorflow for the whole run instead of just the imports. Imports got faster, then inference crashed in
-  `einops`.
-- Starting the background weight read later, after the install. The time moved between phases; the total did not (65 s
-  against 67 s).
-
-The first of these is why the skill has a rule: **one cold measurement per session**. The second import in a session is
-warm, so a before/after inside one session measures the page cache, not the change.
-
 ## Install
 
 In Claude Code:
@@ -120,14 +78,11 @@ Everything is created private: one Kaggle Model per pair, one dataset named `whe
 `pair-build-*` and `pair-run-*`. Builds and probes run on CPU notebooks, which are free. GPU runs spend your weekly
 quota; the skill says how many minutes it expects and waits for a yes.
 
-## Limits, stated plainly
+## Limits
 
-- Measured on Kaggle in October 2026, Python 3.13 image, T4 notebooks. Kaggle changes; `probes/probe_specs.py` re-reads the
-  platform and the skill is told to correct its own notes when a run disagrees with them.
-- The VRAM verdict is weights times 1.5, a rule of thumb from one model. The run decides.
-- Gated and private Hugging Face repos are not supported: the build notebook cannot read Kaggle secrets.
-- `no_init` and `mmap` + `assign` change how weights get into the model. The skill refuses to ship them for a model until
-  a probe has compared every tensor of both load paths.
+- Measured on Kaggle in October 2026, T4 notebooks. Your numbers will differ; the method is what transfers.
+- The VRAM verdict is an estimate (weights times 1.5). The run decides.
+- Gated and private Hugging Face repos are not supported.
 - Not affiliated with Kaggle, Google or Hugging Face.
 
 ## Licence
