@@ -9,8 +9,10 @@ platform changes: when a run contradicts a line below, trust the run and fix the
   share nothing: no RAM, no page cache, no `/kaggle/tmp`. A warm CPU session cannot hand anything to a GPU session.
 - GPU quota is wall-clock time of a GPU-enabled session, busy or idle. Startup seconds are quota.
 - A run is capped at 12 h. Not tested here: taken from Kaggle's documentation.
-- One GPU notebook at a time per account in practice; the GPU queue took about 10 minutes. CPU notebooks start in about a
-  minute and several run at once.
+- Two GPU notebooks ran at the same time on one account, each with its own two T4s (a third was not tried). The GPU queue
+  varies: about 10 minutes on one afternoon, about 1 minute that night. CPU notebooks start in about a minute and several
+  run at once.
+- A notebook cannot take the name of one of your datasets: `409 Conflict` on `kernels push`.
 - CPU notebooks: 4 cores, 31 GiB RAM, torch `2.11.0+cpu`. GPU notebooks: 2x T4 with 15 GiB each, torch `+cu128`. The
   two images differ, so a CPU measurement is a lead and a GPU run is the result.
 - The image ships its own torch, torchvision, torchaudio, torchcodec, built against its CUDA. Never ship or reinstall
