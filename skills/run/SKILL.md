@@ -32,10 +32,14 @@ Read `references/kaggle-facts.md` before writing any notebook code. It is short,
   show the error line.
 - **Never touch Kaggle's own packages**, and never ship torch or anything compiled against it. The pair lives in its own uv
   venv.
+- **Leave no notebooks behind.** Delete each probe and run notebook you pushed once its output is in `kaggle_out/`
+  (`kaggle kernels delete <user>/<slug> --yes`). Never one that is still running, and never one of the user's own.
 
 ## 0. Preflight
 
-- `kaggle --version` and a logged-in CLI (`~/.kaggle/`). On Windows prefix kaggle commands with `PYTHONUTF8=1`.
+- `kaggle --version` and a logged-in CLI (`~/.kaggle/`), or `KAGGLE_API_TOKEN` and `KAGGLE_USERNAME` in the environment
+  (the login expires within hours: use the token for a long tuning loop). On Windows prefix kaggle commands with
+  `PYTHONUTF8=1`.
 - `uv --version` locally (used for the free dependency check).
 - If `references/kaggle-facts.md` looks stale, or the user is on a different accelerator, refresh the numbers:
   `kaggle_push.py run scripts/probes/probe_specs.py specs --no-wheels` (add `--gpu` only with the user's yes).

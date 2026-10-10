@@ -9,10 +9,19 @@ platform changes: when a run contradicts a line below, trust the run and fix the
   share nothing: no RAM, no page cache, no `/kaggle/tmp`. A warm CPU session cannot hand anything to a GPU session.
 - GPU quota is wall-clock time of a GPU-enabled session, busy or idle. Startup seconds are quota.
 - A run is capped at 12 h. Not tested here: taken from Kaggle's documentation.
-- Two GPU notebooks ran at the same time on one account, each with its own two T4s (a third was not tried). The GPU queue
-  varies: about 10 minutes on one afternoon, about 1 minute that night. CPU notebooks start in about a minute and several
-  run at once.
+- Two GPU notebooks run at the same time on one account, each with its own two T4s. A third is refused: `kernels push`
+  prints `Maximum batch GPU session count of 2 reached` and still exits 0, so check its output for `successfully pushed`.
+- The queue varies and Kaggle hides it: `kernels status` says RUNNING while the notebook still waits for a machine.
+  Measured on one Saturday: under a minute around noon; in the afternoon 10 s, 3.5 min, 5 min, 7 min, 20 min and once
+  about an hour, for CPU and GPU notebooks alike, two of them pushed 22 s apart with the same script and inputs. A
+  15 GiB Model attached and never read did not change it (48 s in all). So a long RUNNING is not a hung script: print
+  the UTC time on the script's first line and compare it with the push time before debugging anything. There is no log
+  and no cancel for a running notebook from the CLI (`kernels logs -f` gave HTTP 500); deleting it stops it and loses
+  the log.
 - A notebook cannot take the name of one of your datasets: `409 Conflict` on `kernels push`.
+- Every push under a new tag leaves a notebook on the account: 69 piled up here in 8 days of probes and test runs.
+  Once its output is downloaded, delete it: `kaggle kernels delete <user>/<slug> --yes`. Never a running one (that
+  stops it and loses the log), and never a notebook you did not push.
 - CPU notebooks: 4 cores, 31 GiB RAM, torch `2.11.0+cpu`. GPU notebooks: 2x T4 with 15 GiB each, torch `+cu128`. The
   two images differ, so a CPU measurement is a lead and a GPU run is the result.
 - The image ships its own torch, torchvision, torchaudio, torchcodec, built against its CUDA. Never ship or reinstall
@@ -62,7 +71,9 @@ platform changes: when a run contradicts a line below, trust the run and fix the
 - The CLI's OAuth login (`kaggle auth login`) expires and was not renewed by itself: 12 h after login every call failed
   with `Permission 'kernels.get' was denied` or `Authentication required`, in the middle of a run. The notebook kept
   running; only the local wait died. `kaggle auth login` then says "already logged-in"; `kaggle auth login --force`
-  fixes it, and the token it issued lasted 3 h. For anything unattended, use an API token instead of the OAuth login.
+  fixes it, and the token it issued lasted 3 h. For anything unattended, set `KAGGLE_API_TOKEN` (Kaggle settings, API)
+  and `KAGGLE_USERNAME` in the environment instead: a job went from push to downloaded output on those two alone, with
+  the OAuth login hidden.
 
 ## Python packaging traps
 
