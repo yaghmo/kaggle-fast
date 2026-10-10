@@ -61,6 +61,30 @@ def warm(*paths, threads: int = 16) -> threading.Thread:
     return t
 
 
+def warm_metadata() -> threading.Thread:
+    """Stat, with 32 threads and in the background, the files importlib.metadata.packages_distributions() checks one at
+    a time. diffusers and transformers both call it at import, and for every installed package without a top_level.txt
+    it stats each file of that package: 60,209 files on Kaggle's image, 9 s of a cold session. Measured in two fresh CPU
+    sessions importing torch + diffusers + two pipelines: 39.5 s as is, 26.5 s with this and the memo in activate()
+    (the stats took 5.3 s here). Reading the metadata files alone did not help (40.7 s). load() starts it."""
+    def run():
+        import csv, importlib.metadata as md
+        files = []
+        for d in md.distributions():
+            if not (d.read_text("top_level.txt") or "").split():
+                files += [str(d.locate_file(r[0])) for r in csv.reader((d.read_text("RECORD") or "").splitlines()) if r]
+        def stat(f):
+            try:
+                os.stat(f)
+            except OSError:
+                pass
+        with ThreadPoolExecutor(32) as ex:
+            list(ex.map(stat, files))
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t
+
+
 @contextlib.contextmanager
 def no_init():
     """Random weight init does nothing inside this block. Wrap the model constructor only, and only when every weight it
@@ -115,6 +139,7 @@ def no_init_patch(file, line: str):
 def load(name: str, need_model: bool = True) -> SimpleNamespace:
     """need_model=False for a wheels-only pair (the weights are some other attached Model: warm() them yourself)."""
     TMP.mkdir(parents=True, exist_ok=True)
+    warm_metadata()  # overlaps the venv build below
     # albumentations (pulled in by insightface) looks for a newer release at import and, with Internet off, waits for the
     # timeout. Measured: one model's imports 72.9 -> 10.0 s. Set here so the pair's subprocesses inherit it.
     os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
@@ -151,5 +176,8 @@ def load(name: str, need_model: bool = True) -> SimpleNamespace:
 
     def activate():
         sys.path.insert(0, site.as_posix())
+        # diffusers and transformers each build this map at import (2.3 s per call even warm); memo: built once per run
+        import functools, importlib.metadata as md
+        md.packages_distributions = functools.cache(md.packages_distributions)
 
     return SimpleNamespace(model=model, wheels=wheels, python=str(py), source=source, activate=activate)

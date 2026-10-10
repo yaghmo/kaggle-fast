@@ -11,6 +11,7 @@ the method transfers, the seconds do not. Measure before applying anything that 
 3. `torch.load` copies the whole checkpoint
 4. Dtype cast on the CPU during the move to the GPU
 5. A library waits on the network at import
+5a. Two libraries build the package map, one stat at a time
 6. Kaggle's tensorflow imported by accident
 7. Recursive globs over `/kaggle/input`
 8. Tried, did not help
@@ -122,6 +123,25 @@ Add others to the loader as you find them, each with the measurement that justif
 
 **Measured.** LatentSync entry point imports: 72.9 s -> 10.0 s.
 
+## 5a. Two libraries build the package map, one stat at a time
+
+**Symptom.** `probe_imports.py` shows `diffusers.utils.import_utils` (or `transformers.utils.import_utils`) with seconds of
+own time: 11.4 s in a cold session, 2.3 s warm, each.
+
+**Probe.** `cProfile` around the import in a fresh CPU session, sorted by cumulative time. Here:
+`importlib.metadata.packages_distributions` 18.4 s under the profiler, of which `posix.stat` 9.1 s in 74,906 calls. For
+every installed package without a `top_level.txt` (300 on Kaggle's image) the standard library infers the top-level names
+from the package's file list, and drops missing files by statting each one: 60,209 files, one at a time, cold.
+
+**Fix.** Both in the loader. `warm_metadata()` stats those same files with 32 threads in the background while the venv is
+built (5.3 s on its own); `activate()` wraps `importlib.metadata.packages_distributions` in `functools.cache`, so the
+second library gets the first one's map. The memo returns the standard library's own result (923 names, compared equal).
+It only reaches code that runs in the notebook's process; a model run through `pair.python` still gets the warm stats.
+
+**Measured.** Two fresh CPU sessions, torch + diffusers + two pipelines: 39.5 s as is, 26.5 s with both. On GPU the gain
+was smaller: FLUX.2 klein, start to "imports done" 37 s -> 32 s, whole run 90 s -> 86 s, same four images (mean and std
+of each identical). One run each.
+
 ## 6. Kaggle's tensorflow imported by accident
 
 **Symptom.** `probe_imports.py` lists `tensorflow...` among the slowest module bodies of a model that does not use it. It
@@ -163,6 +183,9 @@ Keep these so nobody spends a run on them again.
   fresh CPU sessions, same imports: without 13.5 s load + 44.3 s imports, with 20.1 s load + 37.7 s imports. Both reached
   "imports done" at 60.1 s: the warm-up only moved the time. Reading whole package folders is too much; it was still
   running when the imports finished.
+- **Reading every package's metadata files (`*.dist-info/*`, 5,741 files, 30 MiB) with 32 threads before the imports.**
+  40.7 s against 39.5 s without. The slow part of `packages_distributions()` is the stat of each installed file, not the
+  read of the metadata: see section 5a.
 - **`USE_TF=0` / `USE_FLAX=0` for speed.** No difference in import time. Still needed for correctness when Kaggle's
   tensorflow and your protobuf disagree.
 - **Building the model in fp16 or fp32.** Same construction time (47.4 s against 48.5 s): the cost is the random init,

@@ -134,6 +134,7 @@ the total.
 | model on GPU | `probes/probe_build.py` | `torch.load` copying the whole file, twice the RAM | `torch.load(mmap=True)` + `load_state_dict(assign=True)` |
 | imports | `probes/probe_imports.py` | a library waiting on the network with Internet off | its off switch, set in the loader |
 | imports | `probes/probe_imports.py` | Kaggle's tensorflow pulled in by a side door | `with no_tensorflow():` around the imports only |
+| imports | `probes/probe_imports.py`, then cProfile | `packages_distributions()` statting every installed file, once per library | already in the loader: `warm_metadata()` and the memo in `activate()` |
 | pair load | stamps inside `load()` | a recursive glob, or contention with a warm-up | exact mount paths |
 
 `references/speedups.md` has, for each row, how to read the probe, the code, the gain measured on a real model, and a list

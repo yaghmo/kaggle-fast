@@ -18,6 +18,10 @@ platform changes: when a run contradicts a line below, trust the run and fix the
   the UTC time on the script's first line and compare it with the push time before debugging anything. There is no log
   and no cancel for a running notebook from the CLI (`kernels logs -f` gave HTTP 500); deleting it stops it and loses
   the log.
+- The wait is not a line you stand in: some notebooks are simply not given a machine. One evening four notebooks (CPU
+  and GPU) sat in RUNNING for 15 to 65 minutes while a three-line control notebook pushed beside them started 8 s after
+  its push and was complete in 32 s. Deleted and pushed again, the same code ran at once. So when a notebook is far past
+  its usual time, push a trivial control: if the control runs, delete the stuck notebook and push it again.
 - A notebook cannot take the name of one of your datasets: `409 Conflict` on `kernels push`.
 - Every push under a new tag leaves a notebook on the account: 69 piled up here in 8 days of probes and test runs.
   Once its output is downloaded, delete it: `kaggle kernels delete <user>/<slug> --yes`. Never a running one (that
