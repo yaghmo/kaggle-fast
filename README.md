@@ -72,7 +72,7 @@ In Claude Code:
 
 ```
 /plugin marketplace add yaghmo/kaggle-fast
-/plugin install kaggle-fast@yaghmo
+/plugin install kaggle-fast@kaggle-fast
 ```
 
 Needs: the `kaggle` CLI, logged in; `uv`; Python 3.10 or newer on your machine. No other dependencies.
