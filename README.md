@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/kaggle-fast-banner.gif" alt="A kid jumps out of a bush, scares a goose, chases it, and watches it vanish over the horizon" width="640"></p>
+
 # kaggle-fast: 96 seconds of model loading down to 4
 
 A skill for Claude Code that makes a Hugging Face model start fast on a free Kaggle GPU notebook. It measures where the
