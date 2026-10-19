@@ -3,9 +3,15 @@
   python kaggle_push.py have [search words]
       What is already on Kaggle: your Models with their files, the pairs in your `wheels` dataset, and (with search
       words) other people's public models and datasets. Run it before writing a spec: what exists is borrowed, not rebuilt.
-  python kaggle_push.py build pair.json [more.json ...] [--no-upload] [--no-models] [--rebuild]
+  python kaggle_push.py build pair.json [more.json ...] [--no-upload] [--no-models] [--rebuild] [--hf-token] [--gpu]
+                        [--source-kernel=<notebook>,<notebook>]
       CPU notebook: weights -> Kaggle Model, wheels -> the `wheels` Kaggle Dataset. Prints the tail of the build log.
       A Model or a pair's wheels that already exist on your account are kept as they are; --rebuild replaces them.
+      A spec with "quantize": its Model is made in a GPU notebook after the wheels (bitsandbytes needs CUDA), so it
+      needs --gpu: GPU time is weekly quota. --hf-token: for a gated repo, your local Hugging Face token goes up as a
+      private dataset for the length of the build and is deleted after; it never appears in the notebook source.
+      --source-kernel: your notebooks whose outputs already hold some of the spec's files (an older cache): those
+      files are linked from there, not downloaded, so a gated repo needs no token and a GPU build no download time.
   python kaggle_push.py run script.py <tag> [--gpu] [--internet] [--no-wheels]
                         [--model-source user/model/Framework/variation/version]... [--dataset-source user/dataset]...
       Pushes script.py with kaggle_pair.py pasted in front (notebooks are single files), waits, downloads the output into
@@ -36,7 +42,7 @@ def user() -> str:
     sys.exit("Kaggle username not found: set KAGGLE_USERNAME or log the kaggle CLI in.")
 
 
-def push(slug: str, code: str, gpu: bool, internet: bool, datasets: list, models: list) -> str:
+def push(slug: str, code: str, gpu: bool, internet: bool, datasets: list, models: list, kernels=()) -> str:
     """Push one script notebook, wait for it to end, return the final status line."""
     with tempfile.TemporaryDirectory() as d:
         (Path(d) / f"{slug}.py").write_text(code, encoding="utf-8")
@@ -44,7 +50,7 @@ def push(slug: str, code: str, gpu: bool, internet: bool, datasets: list, models
             "id": f"{user()}/{slug}", "title": slug, "code_file": f"{slug}.py", "language": "python", "kernel_type": "script",
             "is_private": "true", "enable_gpu": str(gpu).lower(), "enable_internet": str(internet).lower(),
             "machine_shape": "NvidiaTeslaT4" if gpu else "", "dataset_sources": datasets, "model_sources": models,
-            "kernel_sources": [], "competition_sources": []}))
+            "kernel_sources": [f"{user()}/{k}" for k in kernels], "competition_sources": []}))
         print(kaggle("kernels", "push", "-p", d).strip(), flush=True)
     t0, warned = time.time(), False
     while True:
@@ -125,13 +131,61 @@ def have(words: list):
                 print(f"  {kind[:-1]:7} {r['ref']}" + (f"  {r['size']/2**30:.2f} GiB" if r.get("size") else ""))
 
 
+TOKEN_DS = "pair-hf-token"
+
+
+def upload_token() -> list:
+    """[the token dataset]: HF_TOKEN or the `hf auth login` token, uploaded private. A pushed notebook cannot read Kaggle
+    secrets, so this is the way in for a gated repo. build() deletes it in a finally."""
+    t = os.environ.get("HF_TOKEN") or next((f.read_text().strip() for f in [Path.home() / ".cache/huggingface/token"]
+                                            if f.exists()), "")
+    if not t:
+        sys.exit("--hf-token: set HF_TOKEN or run `hf auth login` (and accept the model's terms on its HF page).")
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "hf_token").write_text(t, encoding="utf-8")
+        (Path(d) / "dataset-metadata.json").write_text(json.dumps(
+            {"title": TOKEN_DS, "id": f"{user()}/{TOKEN_DS}", "licenses": [{"name": "CC0-1.0"}]}))
+        kaggle("datasets", "create", "-p", d)  # private by default
+    for _ in range(60):
+        # a status call right after create was refused (403 Forbidden, 2026-10-17): the new dataset was not visible yet
+        r = subprocess.run([KAGGLE, "datasets", "status", f"{user()}/{TOKEN_DS}"], capture_output=True, text=True,
+                           encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1"})
+        if "ready" in r.stdout.lower():
+            return [f"{user()}/{TOKEN_DS}"]
+        time.sleep(10)
+    sys.exit(f"{TOKEN_DS} was not ready after 10 minutes.")
+
+
+def build_log(slug: str, what: str):
+    out = OUT / slug
+    log = out / "setup.log"
+    log.unlink(missing_ok=True)  # a notebook that never ran writes none: the last run's log was shown as this one's
+    kaggle("kernels", "output", f"{user()}/{slug}", "-p", str(out), "--force", "--file-pattern", r"setup\.log")
+    text = log.read_text(encoding="utf-8") if log.exists() else "(no setup.log: the script crashed before logging)"
+    print("\n".join(text.splitlines()[-25:]))
+    subprocess.run([KAGGLE, "kernels", "delete", f"{user()}/{slug}", "--yes"], capture_output=True)  # log is local now
+    if "ALL DONE" not in text:  # script notebooks report "complete" even when the script crashed: trust the marker
+        sys.exit(f"Build of {what} did not finish. Full log: {log}")
+
+
 def build(specs: list, flags: list):
+    try:  # the upload is inside: a token dataset created and then left by a failed wait was found on Kaggle once
+        token = upload_token() if "--hf-token" in flags else []
+        src = [k for f in flags if f.startswith("--source-kernel=") for k in f.split("=", 1)[1].split(",")]
+        _build(specs, [f for f in flags if f not in ("--hf-token", "--gpu") and not f.startswith("--source-kernel=")],
+               token, "--gpu" in flags, src)
+    finally:
+        if "--hf-token" in flags:
+            subprocess.run([KAGGLE, "datasets", "delete", f"{user()}/{TOKEN_DS}", "--yes"], capture_output=True)
+
+
+def _build(specs: list, flags: list, token: list, gpu: bool, src: list = ()):
     pairs, built = {}, wheel_pairs()
     for f in specs:
         spec = json.loads(Path(f).read_text(encoding="utf-8"))
-        name, src = spec["name"], spec.get("wheels_from")
-        if src and src not in built:
-            sys.exit(f"{name}: wheels_from names pair '{src}', which is not in the wheels dataset ({sorted(built)}).")
+        name, wf = spec["name"], spec.get("wheels_from")  # not `src`: that is the --source-kernel list
+        if wf and wf not in built:
+            sys.exit(f"{name}: wheels_from names pair '{wf}', which is not in the wheels dataset ({sorted(built)}).")
         skip = []
         if "--rebuild" not in flags:  # borrow what is already on the account
             if name in built:
@@ -146,18 +200,36 @@ def build(specs: list, flags: list):
         pairs[name] = {**spec, "skip": skip}
     if not pairs:
         return print("Nothing to build.")
-    name = "-".join(pairs)
-    slug = f"pair-build-{name}"
-    code = (f"import sys\nsys.argv = ['kaggle_setup.py', *{flags!r}]\nPAIRS_JSON = {json.dumps(pairs)!r}\n"
-            f"KEEP = {sorted(built)!r}\n" + (HERE / "kaggle_setup.py").read_text(encoding="utf-8"))
-    print(push(slug, code, gpu=False, internet=True, datasets=wheels_ready(), models=[]))  # current wheels attached: other pairs are carried over
-    out = OUT / slug
-    kaggle("kernels", "output", f"{user()}/{slug}", "-p", str(out), "--force", "--file-pattern", r"setup\.log")
-    log = out / "setup.log"
-    text = log.read_text(encoding="utf-8") if log.exists() else "(no setup.log: the script crashed before logging)"
-    print("\n".join(text.splitlines()[-25:]))
-    if "ALL DONE" not in text:  # script notebooks report "complete" even when the script crashed: trust the marker
-        sys.exit(f"Build of {name} did not finish. Full log: {log}")
+    # a quantized Model is made in a GPU notebook, after the wheels it quantizes with are in the dataset
+    quant = {n: p for n, p in pairs.items() if p.get("quantize") and p.get("hf") and "model" not in p["skip"]
+             and "--no-models" not in flags}
+    if quant and not gpu:
+        sys.exit(f"{sorted(quant)}: spec key quantize needs a GPU notebook. Add --gpu (weekly quota: the download of the "
+                 "full-precision weights plus a few minutes per component).")
+    cpu = {n: {**p, "skip": p["skip"] + ["model"] * (n in quant)} for n, p in pairs.items()}
+    if any(len(p["skip"]) < 1 + bool(p.get("hf")) for p in cpu.values()):
+        name = "-".join(cpu)
+        code = (f"import sys\nsys.argv = ['kaggle_setup.py', *{flags!r}]\nPAIRS_JSON = {json.dumps(cpu)!r}\n"
+                f"KEEP = {sorted(built)!r}\n" + (HERE / "kaggle_setup.py").read_text(encoding="utf-8"))
+        # current wheels attached: other pairs are carried over
+        print(push(f"pair-build-{name}", code, gpu=False, internet=True, datasets=wheels_ready() + token, models=[], kernels=src))
+        build_log(f"pair-build-{name}", name)
+    for name in quant:
+        # Right after an upload, `datasets status` can still say ready about the version before: a GPU notebook pushed
+        # then mounted it and stopped with "PAIR_klein9b_WHEELS not found" after downloading 34 GB (2026-10-17).
+        for _ in range(60):
+            if name in wheel_pairs():
+                break
+            time.sleep(30)
+        else:
+            sys.exit(f"Pair {name} is not in the wheels dataset 30 minutes after its build.")
+    for name, p in quant.items():  # the loader goes in front: quantize() builds the pair's venv with load()
+        code = (f"import sys\nsys.argv = ['kaggle_setup.py', '--quantize', *{flags!r}]\n"
+                f"PAIRS_JSON = {json.dumps({name: {**p, 'skip': ['wheels']}})!r}\nKEEP = []\n"
+                + (HERE / "kaggle_pair.py").read_text(encoding="utf-8") + "\n"
+                + (HERE / "kaggle_setup.py").read_text(encoding="utf-8"))
+        print(push(f"pair-quant-{name}", code, gpu=True, internet=True, datasets=wheels_ready() + token, models=[], kernels=src))
+        build_log(f"pair-quant-{name}", name)
 
 
 def run(script: str, tag: str, argv: list):

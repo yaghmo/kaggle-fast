@@ -12,7 +12,10 @@ here fit the notebooks that load them. Building one pair keeps the others, as lo
 attached (kaggle_push.py does that).
 
 Flags: --no-upload (build, upload nothing: a smoke test)   --no-models (wheels only)
+       --quantize (GPU notebook, after the wheels exist: the Model is downloaded, its spec "quantize" components are saved
+       quantized through the pair's own venv, and that is what gets uploaded)
 kaggle_push.py adds "skip": ["wheels" and/or "model"] to a spec for what the account already has: that part is kept as is.
+A gated repo: kaggle_push.py build --hf-token attaches the token as a private dataset for the build and deletes it after.
 """
 import json, os, shutil, subprocess, sys, time, zipfile
 from pathlib import Path
@@ -51,9 +54,11 @@ def uv() -> str:
 def fetch(url: str, dst: Path, want: int | None = None, token: str | None = None):
     """curl straight to dst and verify the size. HF's Xet client once left a 0-byte file while exiting 0."""
     dst.parent.mkdir(parents=True, exist_ok=True)
-    auth = f'-H "Authorization: Bearer {token}"' if token else ""
+    # the token reaches curl through the environment: sh() prints the command, and the log is the notebook's output
+    auth = '-H "Authorization: Bearer $HF_AUTH"' if token else ""
     for attempt in range(1, 4):
-        sh(f'curl -fsSL {auth} --retry 5 --retry-delay 5 --retry-all-errors -C - -o "{dst}" "{url}"')
+        sh(f'curl -fsSL {auth} --retry 5 --retry-delay 5 --retry-all-errors -C - -o "{dst}" "{url}"',
+           env={**os.environ, "HF_AUTH": token or ""})
         got = dst.stat().st_size if dst.exists() else 0
         print(f"  {dst.name}: {got}/{want or '?'} bytes (attempt {attempt})", flush=True)
         if want is None and got > 0 or got == want:
@@ -61,13 +66,35 @@ def fetch(url: str, dst: Path, want: int | None = None, token: str | None = None
     raise RuntimeError(f"{dst}: got {got} bytes, expected {want}")
 
 
+def hf_token():
+    """HF_TOKEN, or the token kaggle_push.py build --hf-token attached as a dataset (a pushed notebook gets no secrets)."""
+    f = next(Path("/kaggle/input").glob("datasets/*/pair-hf-token/hf_token"), None)
+    return os.environ.get("HF_TOKEN") or (f.read_text().strip() if f else None)
+
+
+def on_kaggle(f: str):
+    """The file at that path inside an attached notebook's output (build --source-kernel), or None. Exact depths: a
+    recursive walk of /kaggle/input is slow with big inputs attached."""
+    return next((x for depth in ("*", "*/*") for x in Path("/kaggle/input").glob(f"notebooks/*/*/{depth}/{f}")), None)
+
+
 def build_model(p: dict, out: Path):
     from huggingface_hub import HfApi
-    token = os.environ.get("HF_TOKEN")
+    token = hf_token()
     for repo, files, sub in p.get("hf", []):
+        # files already on Kaggle are linked, not downloaded: no Internet time, no token (on a GPU notebook, no quota)
+        have = {f: on_kaggle(f) for f in files or []}
+        for f, x in have.items():
+            if x:
+                (out / sub / f).parent.mkdir(parents=True, exist_ok=True)
+                (out / sub / f).symlink_to(x)
+        print(f"{repo}: {sum(map(bool, have.values()))} of {len(have)} named files linked from attached notebooks", flush=True)
+        if files and all(have.values()):
+            continue
         sizes = {s.rfilename: s.size for s in HfApi().model_info(repo, files_metadata=True, token=token).siblings}
         for f in files or [f for f in sizes if not f.endswith((".md", ".gitattributes"))]:
-            fetch(f"https://huggingface.co/{repo}/resolve/main/{f}", out / sub / f, sizes[f], token)
+            if not have.get(f):
+                fetch(f"https://huggingface.co/{repo}/resolve/main/{f}", out / sub / f, sizes[f], token)
     for rel, url in p.get("zips", {}).items():
         z = WORK / "tmp.zip"
         fetch(url, z)
@@ -75,6 +102,47 @@ def build_model(p: dict, out: Path):
         z.unlink()
     if p.get("license_url"):
         fetch(p["license_url"], out / "LICENSE")
+
+
+# Runs in the pair's venv: argv = component folder, int8 | nf4, compute dtype, output folder. A diffusers component names
+# its class in config.json "_class_name", a transformers one in "architectures". Both save the quantization config into
+# config.json, so the run loads the folder with a plain from_pretrained and no quantization_config.
+QUANT = """import json, sys, torch
+from pathlib import Path
+# Kaggle's torchao is older than new diffusers expects ("cannot import name 'FqnToConfig'"): hidden, diffusers then
+# treats it as not installed. Quantization here is bitsandbytes only.
+sys.modules["torchao"] = None
+d, q, dt, out = Path(sys.argv[1]), sys.argv[2], getattr(torch, sys.argv[3]), sys.argv[4]
+cfg = json.loads((d / "config.json").read_text())
+if "_class_name" in cfg:
+    import diffusers as lib
+    cls, kw = getattr(lib, cfg["_class_name"]), dict(torch_dtype=dt)
+else:
+    import transformers as lib
+    cls, kw = getattr(lib, cfg["architectures"][0]), dict(dtype=dt)
+qc = lib.BitsAndBytesConfig(load_in_8bit=True) if q == "int8" else lib.BitsAndBytesConfig(
+    load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=dt)
+cls.from_pretrained(d, quantization_config=qc, device_map={"": 0}, **kw).save_pretrained(out, max_shard_size="5GB")
+print(f"{d.name}: {q}, peak {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB on the GPU", flush=True)
+"""
+
+
+def quantize(p: dict, model: Path, python: str):
+    """Spec "quantize": {component folder: "int8" | "nf4"}. Done once here instead of at every load: a run that quantizes
+    reads the full-precision files and spends GPU time on it every session, and needs the GPU memory of the unquantized
+    layer it is converting. One component at a time, each replacing its folder, so the disk holds one extra copy at most."""
+    dtype = p.get("quantize_dtype", "float16")  # T4 has no native bf16; "bfloat16" for a model that overflows in fp16
+    for comp, q in p["quantize"].items():
+        d = model / comp
+        before = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+        # captured, not inherited: a child's stderr went to the notebook log only, never into setup.log
+        r = subprocess.run([python, "-c", QUANT, d, q, dtype, f"{d}.q"], capture_output=True, text=True)
+        print(r.stdout + r.stderr[-4000:], flush=True)
+        r.check_returncode()
+        shutil.rmtree(d)
+        Path(f"{d}.q").rename(d)
+        after = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+        stamp(f"{comp}: {before/2**30:.2f} -> {after/2**30:.2f} GiB ({q})")
 
 
 def build_wheels(name: str, p: dict, out: Path):
@@ -145,6 +213,8 @@ def main():
         if p.get("hf") and "model" not in skip and "--no-models" not in sys.argv:
             model = WORK / p["model_slug"]
             build_model(p, model)
+            if "--quantize" in sys.argv:
+                quantize(p, model, load(name, need_model=False).python)  # load(): kaggle_pair.py, pasted in front
             (model / f"PAIR_{name}_MODEL").write_text(name)
             stamp(f"{name}: model built, {sum(f.stat().st_size for f in model.rglob('*') if f.is_file())/2**30:.2f} GiB")
             if upload:

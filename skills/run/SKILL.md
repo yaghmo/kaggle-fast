@@ -32,6 +32,12 @@ Read `references/kaggle-facts.md` before writing any notebook code. It is short,
   show the error line.
 - **Never touch Kaggle's own packages**, and never ship torch or anything compiled against it. The pair lives in its own uv
   venv.
+- **Weights live in Kaggle Models, never in a notebook's output.** An output is capped at 20 GB, hides the weights
+  under Code, and dies with its notebook. When one Model would be too big, split it by component into several Models
+  (`<slug>` and `<slug>-te`, say), attach them all and link them into one folder at run time (`load()` finds one
+  Model per pair; the run script links the others in, file by file, under `/kaggle/tmp`). A cache that already
+  sits in a notebook output is moved into a Model (`build --source-kernel=<notebook>` links its files instead of
+  downloading them), then the notebook is deleted with the user's yes.
 - **Leave no notebooks behind.** Delete each probe and run notebook you pushed once its output is in `kaggle_out/`
   (`kaggle kernels delete <user>/<slug> --yes`). Never one that is still running, and never one of the user's own.
 
@@ -68,6 +74,25 @@ It prints the weight files, licence, gating and a verdict per limit. Then do the
    - Other people's uploads are a lead, not a source. They can change or vanish, and a `.pth` is a pickle. Borrow one only
      with the user's yes, after a CPU notebook has matched its sha256 with Hugging Face.
 
+### Fitting a T4
+
+A GPU notebook has two T4s of 15 GiB each, no native bf16, and 30 GiB of host RAM. When the fit check says "too big",
+go down this list and stop at the first rung that fits. Rungs 1 to 3 keep the output; 4 changes it, so the user decides.
+
+1. **fp16.** Cast fp32 weights to fp16 in the build (half the upload and the read). A model that overflows in fp16
+   (black or NaN output) runs in bf16, which a T4 emulates: correct, slower, and its attention gets no memory-efficient
+   kernel, so it may need a smaller resolution.
+2. **One component at a time.** Pipelines (text encoder, denoiser, VAE) do not need all their parts at once: encode every
+   input, free the encoder, then load the denoiser, and decode after it is freed. The peak is the biggest component.
+3. **Use both cards.** One full copy per T4 with half the inputs each when a copy fits a card (twice the throughput),
+   else one component per card.
+4. **Quantize once, in the build** (spec keys `quantize` and `quantize_dtype`, `references/pair-spec.md`): int8 halves
+   a component, nf4 quarters it. Never quantize at load time in the run: every session then reads the full-precision
+   files, spends GPU time converting, and needs room for the unconverted layer.
+
+Whatever the rung, load the weights once per session and run every input through them: a run split into steps that
+each load the model pays the read and the conversion once per step.
+
 Give the user a short verdict: fits / fits with conditions / does not fit, the reasons, what is borrowed, what would be
 uploaded (file list and total size), and anything that blocks (gated repo, no wheel for a dependency, licence that forbids redistribution even
 privately). **Stop here and ask** before building. If it does not fit, say what would make it fit and do not build.
@@ -85,6 +110,12 @@ wheels, uploads the Model and a new version of the `wheels` dataset. Other pairs
 A Model or a pair's wheels that the account already has are kept and not built again; `--rebuild` replaces them (needed
 after the spec's files or deps change).
 The command prints the tail of `setup.log`; `ALL DONE` is the proof. Typical build: a few minutes plus upload.
+
+- **Gated repo:** add `--hf-token`. The local Hugging Face token goes up as a private dataset for the length of the build
+  and is deleted after; it is never written into the notebook source.
+- **Spec with `quantize`:** add `--gpu`, and ask first: the wheels are built on CPU as usual, then a GPU notebook
+  downloads the weights, quantizes the listed components through the pair's own venv and uploads that Model. The
+  full-precision weights are never uploaded.
 
 ## 3. Write the run script
 

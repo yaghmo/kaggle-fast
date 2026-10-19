@@ -33,6 +33,8 @@ scripts: they are the record of what was built.
 | `wheels_from` | Name of a pair already in `wheels` whose pins cover this model. Replaces `deps` and `excludes`: no wheels are built, the folder holds only `repos`, and `load("<name>")` builds the venv from that pair. Rebuilding that pair with other pins changes this one too. |
 | `excludes` | Packages to leave to Kaggle, on top of torch, torchvision, torchaudio, torchcodec, triton, pillow, requests (always excluded). Add `numpy` when the code is happy with Kaggle's. |
 | `repos` | `{folder: git URL}` cloned at build time, commit recorded in `SOURCES.txt`, read at run time with `pair.source("<folder>")`. |
+| `quantize` | `{component folder: "int8" \| "nf4"}`, e.g. `{"transformer": "int8", "text_encoder": "int8"}`. Those folders go into the Model already quantized with bitsandbytes, so the run loads them with a plain `from_pretrained` (the quantization config is in their `config.json`) and reads half (int8) or a quarter (nf4) of the bytes. Needs `bitsandbytes` in `deps` (Kaggle's image has none) and `build --gpu`: the Model is made in a GPU notebook after the wheels. Each folder needs a `config.json` naming its class (`_class_name` for diffusers, `architectures` for transformers). |
+| `quantize_dtype` | Dtype of the layers bitsandbytes leaves alone and of its compute. `"float16"` (default: a T4 has no native bf16). `"bfloat16"` for a model that overflows to black or NaN output in fp16. |
 
 ## Getting the spec right
 
@@ -52,5 +54,9 @@ scripts: they are the record of what was built.
 - **An old numpy pin usually has to go**: Python 3.13 has no numpy 1.26 wheel. Drop the pin and let the run tell you.
 - **Do not add torch, CUDA or anything compiled against them** (xformers, flash-attn, torch-scatter). Kaggle's torch stays;
   a wheel built against another torch breaks at import.
+- **Quantizing changes the output**, unlike the startup fixes: build it when the model does not fit a T4 otherwise (see
+  "Fitting a T4" in `SKILL.md`), compare a few outputs with the full-precision ones where you can, and let the user decide.
+- **A gated repo** (`hf_fit.py` says so) needs its terms accepted on Hugging Face by the token's account, then
+  `build --hf-token`.
 - After a build, read the tail of `setup.log`: the pinned source commits and wheel counts are printed there. `ALL DONE` is
   the only proof it finished.

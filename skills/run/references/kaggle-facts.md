@@ -31,6 +31,12 @@ platform changes: when a run contradicts a line below, trust the run and fix the
 - The image ships its own torch, torchvision, torchaudio, torchcodec, built against its CUDA. Never ship or reinstall
   these: they are ABI-coupled to each other and to the driver. Read the versions from a probe run, do not assume them.
 - Wheels built in a CPU notebook fit the GPU notebook: same image, same Python.
+- No `bitsandbytes` in the image (CPU image, 2026-10-17: `No package metadata was found for bitsandbytes`; same probe:
+  diffusers 0.40.0, transformers 5.16.1, accelerate 1.14.0). A pair that loads or makes 8-bit / 4-bit weights lists it
+  in `deps`.
+- The image's `torchao` is older than diffusers 0.41 expects: importing a diffusers model class fails with
+  `cannot import name 'FqnToConfig' from 'torchao.quantization'` (2026-10-17). Set `sys.modules["torchao"] = None`
+  before importing diffusers when the run does not quantize with torchao; diffusers then takes it as not installed.
 
 ## Disks
 

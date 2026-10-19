@@ -47,7 +47,7 @@ loaded 4s, VRAM 7.3 GiB, host RAM peak 8.5 GiB
 
 ```
 /kaggle-fast:run <org/repo>            fit check -> you confirm -> build -> run script -> squeeze startup, then the work
-/kaggle-fast:run fit <org/repo>        only the fit check
+/kaggle-fast:run fit <org/repo>        only the fit check (per component, with int8 / nf4 sizes for what is too big)
 /kaggle-fast:run squeeze <run script>  only the squeeze
 ```
 
@@ -89,7 +89,9 @@ quota; the skill says how many minutes it expects and waits for a yes.
 
 - Measured on Kaggle in October 2026, T4 notebooks. Your numbers will differ; the method is what transfers.
 - The VRAM verdict is an estimate (weights times 1.5). The run decides.
-- Gated and private Hugging Face repos are not supported.
+- Gated Hugging Face repos: accept the terms on Hugging Face, then build with `--hf-token`.
+- Quantizing in the build (spec key `quantize`, int8 / nf4) is new: the one int8 build so far gave noise images and is
+  not debugged yet.
 - Not affiliated with Kaggle, Google or Hugging Face.
 
 ## Licence

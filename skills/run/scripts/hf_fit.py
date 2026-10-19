@@ -41,27 +41,54 @@ def fit(repo: str) -> dict:
         "weight_files": [(round(n / GIB, 2), f) for n, f in weights[:25]],
         "same_weights_twice": sorted(v for v in twins.values() if len(v) > 1),
         "params_by_dtype": params, "vram_stored_gib": stored / GIB, "vram_fp16_gib": fp16 / GIB if fp16 else None,
+        "params": sum(params.values()) or None, "components": components(weights),
         "vram_from": "parameter counts in the safetensors metadata" if params else "the size of every weight file added up",
     }
+
+
+def components(weights: list) -> dict:
+    """{top folder: GiB of weight files} when the weights sit in more than one folder (a diffusers pipeline: text_encoder,
+    transformer, vae...). Each is loaded on its own, so each, not the sum, has to fit a card."""
+    out = {}
+    for n, f in weights:
+        if "/" in f:
+            out[f.split("/")[0]] = out.get(f.split("/")[0], 0) + n / GIB
+    return out if len(out) > 1 else {}
+
+
+def where(peak: float) -> str:
+    if peak <= T4_VRAM / GIB: return "fits one T4"
+    if peak <= 2 * T4_VRAM / GIB: return "too big for one T4, fits only if the model can be split over the two"
+    return "does not fit the two T4s"
 
 
 def verdicts(r: dict) -> list:
     out = []
     def gpu(label, gib):
         peak = gib * ACTIVATIONS
-        if peak <= T4_VRAM / GIB: where = "fits one T4"
-        elif peak <= 2 * T4_VRAM / GIB: where = "too big for one T4, fits only if the model can be split over the two"
-        else: where = "does not fit the two T4s"
-        out.append(f"VRAM, {label}: weights {gib:.1f} GiB, peak about {peak:.1f} GiB (x{ACTIVATIONS}) -> {where}")
+        out.append(f"VRAM, {label}: weights {gib:.1f} GiB, peak about {peak:.1f} GiB (x{ACTIVATIONS}) -> {where(peak)}")
     gpu("as stored", r["vram_stored_gib"])
     if r["vram_fp16_gib"] and r["vram_fp16_gib"] < r["vram_stored_gib"] * 0.99:
         gpu("converted to fp16", r["vram_fp16_gib"])
+    # a pipeline repo's safetensors metadata counts one file (often a single-file checkpoint): judge it per component
+    if r["params"] and not r["components"] and where(r["vram_fp16_gib"] or r["vram_stored_gib"]) != "fits one T4":
+        # bitsandbytes leaves norms, embeddings and some heads in fp16: real files come out somewhat above these
+        gpu("int8 (spec key quantize, at least)", r["params"] / GIB)
+        gpu("nf4 (spec key quantize, at least)", r["params"] / 2 / GIB)
+    for c, gib in sorted(r["components"].items(), key=lambda x: -x[1]):
+        # from file sizes, taken as fp16/bf16: a component stored in fp32 is half of this in fp16 already
+        out.append(f"  component {c}: {gib:.1f} GiB of files -> {where(gib * ACTIVATIONS)}; int8 about {gib / 2:.1f} GiB "
+                   f"-> {where(gib / 2 * ACTIVATIONS)}; nf4 about {gib / 4:.1f} GiB -> {where(gib / 4 * ACTIVATIONS)}")
+    if r["components"]:
+        out.append("Components load one after another (encode every prompt, free the encoder, then the denoiser): "
+                   "the peak is the biggest component, not the sum. On two T4s, one component per card.")
     out.append(f"Host RAM ({HOST_RAM/GIB:.0f} GiB): " + ("fine" if r["vram_stored_gib"] * 2 <= HOST_RAM / GIB else
                "a plain torch.load keeps two copies and will not fit: load with mmap + assign (references/speedups.md)"))
     out.append(f"Upload: {r['weights_gib']:.1f} GiB of weight files in the repo; the largest Model uploaded so far was "
                f"{BIGGEST_UPLOADED} GiB" + ("" if r["weights_gib"] <= BIGGEST_UPLOADED else ": beyond what was tested, pick files or expect surprises"))
     if r["gated"] or r["private"]:
-        out.append("BLOCKER: gated or private repo. The build notebook cannot read Kaggle secrets, so it cannot download it.")
+        out.append("Gated or private repo: accept its terms on Hugging Face, then build with --hf-token (a pushed notebook "
+                   "cannot read Kaggle secrets; the token goes up as a private dataset for the build and is deleted after).")
     return out
 
 
